@@ -5,11 +5,13 @@ This repository contains my ongoing do-it-yourself style experimentations of ML 
 ### Progress so far
 
 ##### Sequence-modelling 
-- Scratch impl of Character Level RNN inspired by karpathy's code `[done]`
+- Scratch impl of Character Level RNN inspired by karpathy's code `[done]` 
 - RNN `[WIP]`
+- LSTM : Many to one with pytorch `[done]`
+- LSTM : Many to many with pytorch `[done]`
 
 ##### Transformers
-- GPT `[done]`
+- GPT scratch `[done]`
 
 ##### Classical ML
 - Kmeans 
