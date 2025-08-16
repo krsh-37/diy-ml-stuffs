@@ -13,18 +13,45 @@ class ModelConfig:
     d_model = 128
     seq_len = 32
     batch_size = 2
-    n_layers = 6
-    n_heads = 8
-    n_kv_heads = None
+    n_blocks = 6
+    q_heads = 8
+    kv_heads = 4
+    ffn_multiplier = None
+    ffn_muliple_of = 32
     vocab_size = 64 # set later
     eps = 1e-6
 
-def apply_rotary_emb(q, k, freq):
-    return q, k
+## ROPE
+def precompute_freqs_cis(head_dim, seq_len, theta: float = 10000.0):
+    """
+    precompute rope freqs for all possible value of m-theta to multiple with 
+    q and k 
+    """
+    assert head_dim % 2 == 0, "head_dim must be divisible by 2"
+
+    theta_numerator = torch.arange(0, head_dim, 2).float()
+    freqs = 1.0 / (theta ** (theta_numerator / head_dim )).to(DEVICE)
+    m = torch.arange(seq_len, device=DEVICE)
+    freqs = torch.outer(m, freqs).float()
+
+    freqs_complex = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs_complex
+
+def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs: torch.Tensor):
+    ## convert to pair of numbers for complex number representation
+    q_cmplx = torch.view_as_complex( q.float().reshape(*q.shape[:-1], -1, 2 ) )
+    k_cmplx = torch.view_as_complex( k.float().reshape(*k.shape[:-1], -1, 2 ) )
+    ## add fake batch and heads
+    freqs = freqs.unsqueeze(0).unsqueeze(2)                                   # (seq_len, head_dim/ 2) -> (1, seq_len, 1, head_dim/ 2)
+    ## view as real and reshape to original
+    q_rotated = torch.view_as_real(q_cmplx * freqs).reshape(*q.shape)
+    k_rotated = torch.view_as_real(k_cmplx * freqs).reshape(*k.shape)
+    return q_rotated, k_rotated
 
 class GQA(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.seq_len = config.seq_len
         self.q_heads = config.q_heads
         self.kv_heads = config.kv_heads
         self.head_dim = config.d_model // self.q_heads
@@ -34,12 +61,11 @@ class GQA(nn.Module):
         self.k_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
         self.v_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        self.freqs_cis = torch.randn(config.seq_len)   # TODO
+        self.freqs_cis = precompute_freqs_cis(self.head_dim, self.seq_len)
         
         self.register_buffer('trill', torch.tril(torch.ones((config.seq_len, config.seq_len))), persistent=False)
         self.k_cache = None
         self.v_cache = None
-        self.seq_len = config.seq_len
 
     def forward(self, x, step=None):
         B, T, C = x.shape
@@ -52,12 +78,13 @@ class GQA(nn.Module):
             self.v_proj(x).reshape( B, T, self.kv_heads, self.head_dim ),
         )
         q, k = apply_rotary_emb(q, k, self.freqs_cis[:T])
+
         ## use kv cache
         if step is not None:
             if self.k_cache is None:
                 self.k_cache = torch.zeros(B, self.seq_len, self.kv_heads, self.head_dim, device=x.device)
                 self.v_cache = torch.zeros(B, self.seq_len, self.kv_heads, self.head_dim, device=x.device)
-                
+
             self.k_cache[:, step:step+T] = k
             self.v_cache[:, step:step+T] = v
             k = self.k_cache[:, :step+T]
@@ -66,8 +93,10 @@ class GQA(nn.Module):
         # since C of k and v is less, repeat in heads dim.
         k = k.repeat_interleave(self.n_groups, dim=2)
         v = v.repeat_interleave(self.n_groups, dim=2)
+
         ## swap head and T
         q, k, v = q.transpose(1,2), k.transpose(1,2), v.transpose(1,2)
+
         ## causal attn
         attn = ( q @ k.transpose(-2,-1) ) * (self.head_dim ** -0.5)
         if step is None:
@@ -113,7 +142,8 @@ class FeedForward(nn.Module):
         if config.ffn_multiplier is not None:
             hddn_dim = int( config.ffn_multiplier * hddn_dim )
         ## round off 
-        hddn_dim = config.muliple_of * (( hddn_dim + config.muliple_of -1 ) // config.muliple_of )
+        hddn_dim = config.ffn_muliple_of * (( hddn_dim + config.ffn_muliple_of -1 ) // config.ffn_muliple_of )
+        hddn_dim = int(hddn_dim)
         ## lin layers
         self.w1 = nn.Linear(config.d_model, hddn_dim, bias=False )
         self.w2 = nn.Linear(hddn_dim, config.d_model, bias=False )
@@ -148,18 +178,18 @@ class LLAMAModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.tok_emb = nn.Embedding(config.vocab_size, config.d_model)
-        self.layers = nn.Sequential(* [Block(config=config) for _ in range(config.n_layers) ] )
+        self.blocks = nn.Sequential(* [Block(config=config) for _ in range(config.n_blocks) ] )
         self.out_norm = RMSNorm(config)
         self.out_proj = nn.Linear( config.d_model , config.vocab_size )
 
-    def forward(self, X, targets=None):
+    def forward(self, X, step=None, targets=None):
         """
         B: Batch; T: time_step/ seq_len; C: Channel/ emb_dim/ d_model
         """
         B, T = X.shape
 
         x = self.tok_emb(X)         # (B T C)
-        x = self.layers(x)          # (B T C)
+        x = self.blocks(x)          # (B T C)
         x = self.out_norm(x)        # (B T C)
         logits = self.out_proj(x)   # (B T vc)
         
