@@ -62,7 +62,10 @@ class GQA(nn.Module):
         self.v_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
 
-        freqs_cis = precompute_freqs_cis(self.head_dim, self.seq_len)
+        ## max seq_len for rot emb/ kv cache
+        max_pos = 2 * self.seq_len
+        if max_pos < 2048: max_pos = 2048
+        freqs_cis = precompute_freqs_cis(self.head_dim, max_pos)
         self.register_buffer('freqs_cis', freqs_cis, persistent=False)
         
         self.register_buffer('trill', torch.tril(torch.ones((config.seq_len, config.seq_len))), persistent=False)
@@ -79,7 +82,11 @@ class GQA(nn.Module):
             self.k_proj(x).reshape( B, T, self.kv_heads, self.head_dim ),
             self.v_proj(x).reshape( B, T, self.kv_heads, self.head_dim ),
         )
-        q, k = apply_rotary_emb(q, k, self.freqs_cis[:T])
+        # during training whole seq length is needed
+        if step is None:
+            q, k = apply_rotary_emb(q, k, self.freqs_cis[:T])
+        else:
+            q, k = apply_rotary_emb(q, k, self.freqs_cis[step:step+T])
 
         ## use kv cache
         if step is not None:
@@ -166,13 +173,13 @@ class Block(nn.Module):
         self.ff_norm = RMSNorm(config=config)
         self.ff = FeedForward(config=config)
     
-    def forward(self, x):
+    def forward(self, x, step=None):
         """
         receives (B T C)
         returns (B T C)
         """
         ## refer diagram for the logic
-        x = x + self.attn( self.attn_norm(x) )
+        x = x + self.attn( self.attn_norm(x), step=step )
         x = x + self.ff( self.ff_norm(x) )
         return x
 
@@ -191,10 +198,11 @@ class LLAMAModel(nn.Module):
         """
         B, T = X.shape
 
-        x = self.tok_emb(X)         # (B T C)
-        x = self.blocks(x)          # (B T C)
-        x = self.out_norm(x)        # (B T C)
-        logits = self.out_proj(x)   # (B T vc)
+        x = self.tok_emb(X)            # (B T C)
+        for block in self.blocks:      # (B T C)
+            x = block(x, step=step)
+        x = self.out_norm(x)           # (B T C)
+        logits = self.out_proj(x)      # (B T vc)
         
         loss = None
         if targets is not None:
@@ -205,11 +213,29 @@ class LLAMAModel(nn.Module):
 
         return logits, loss
 
-    def generate(self, idx, max_new_tokens):
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.seq_len:]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] # We are not modifying in forward
+    def generate(self, idx, max_new_tokens, use_kv_cache = True):
+        if use_kv_cache:
+            for block in self.blocks:
+                block.attn.k_cache = None
+                block.attn.v_cache = None
+
+        for step in range(max_new_tokens):
+            ## prompt processing phase
+            ## during inital step or when kv cache disabled, we need to process whole context
+            if (step == 0) or (not use_kv_cache):
+                context = idx[:, -self.seq_len:]
+            ## token generation phase
+            ## send only the last generated token and reuse from kv-cache
+            else:
+                context = idx[:, -1:]
+
+            # kv caching index
+            pos = 0 if (step == 0) else idx.shape[1] - 1
+            if use_kv_cache:
+                logits, _ = self(context, step = pos)
+            else:
+                logits, _ = self(context)
+            logits = logits[:, -1, :] # take the newly generated token
             probs = F.softmax(logits, dim=-1)
             idx_new = torch.multinomial(probs, num_samples=1)
 
