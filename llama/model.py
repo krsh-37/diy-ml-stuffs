@@ -19,12 +19,69 @@ class ModelConfig:
     vocab_size = 64 # set later
     eps = 1e-6
 
+def apply_rotary_emb(q, k, freq):
+    return q, k
+
 class GQA(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.q_heads = config.q_heads
+        self.kv_heads = config.kv_heads
+        self.head_dim = config.d_model // self.q_heads
+        self.n_groups = self.q_heads // self.kv_heads
 
-    def forward(self, x):
-        return x
+        self.q_proj =  nn.Linear(config.d_model, self.q_heads * self.head_dim , bias=False)
+        self.k_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
+        self.v_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
+        self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.freqs_cis = torch.randn(config.seq_len)   # TODO
+        
+        self.register_buffer('trill', torch.tril(torch.ones((config.seq_len, config.seq_len))), persistent=False)
+        self.k_cache = None
+        self.v_cache = None
+        self.seq_len = config.seq_len
+
+    def forward(self, x, step=None):
+        B, T, C = x.shape
+        # q(x)       -> B T C -> B T C
+        # k(x), v(x) -> B T C -> B T (C// self.n_groups)
+        # split C -> n_heads * heads_dim
+        q, k, v = (
+            self.q_proj(x).reshape( B, T, self.q_heads, self.head_dim ),
+            self.k_proj(x).reshape( B, T, self.kv_heads, self.head_dim ),
+            self.v_proj(x).reshape( B, T, self.kv_heads, self.head_dim ),
+        )
+        q, k = apply_rotary_emb(q, k, self.freqs_cis[:T])
+        ## use kv cache
+        if step is not None:
+            if self.k_cache is None:
+                self.k_cache = torch.zeros(B, self.seq_len, self.kv_heads, self.head_dim, device=x.device)
+                self.v_cache = torch.zeros(B, self.seq_len, self.kv_heads, self.head_dim, device=x.device)
+                
+            self.k_cache[:, step:step+T] = k
+            self.v_cache[:, step:step+T] = v
+            k = self.k_cache[:, :step+T]
+            v = self.v_cache[:, :step+T]
+
+        # since C of k and v is less, repeat in heads dim.
+        k = k.repeat_interleave(self.n_groups, dim=2)
+        v = v.repeat_interleave(self.n_groups, dim=2)
+        ## swap head and T
+        q, k, v = q.transpose(1,2), k.transpose(1,2), v.transpose(1,2)
+        ## causal attn
+        attn = ( q @ k.transpose(-2,-1) ) * (self.head_dim ** -0.5)
+        if step is None:
+            attn = attn.masked_fill(self.trill[:T, :T] == 0, float("-inf"))
+        else:
+            mask = self.trill[:attn.size(-2), :attn.size(-1)].to(x.device)
+            attn = attn.masked_fill(mask == 0, float("-inf"))
+
+        attn = F.softmax(attn, dim=-1)
+        out = attn @ v
+        
+        # swap H, T and then back to B T C
+        out = out.transpose(1, 2).reshape(B, T, C)
+        return self.out_proj(out)
 
 class RMSNorm(nn.Module):
     """
