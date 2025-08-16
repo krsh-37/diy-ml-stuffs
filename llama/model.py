@@ -24,8 +24,8 @@ class ModelConfig:
 ## ROPE
 def precompute_freqs_cis(head_dim, seq_len, theta: float = 10000.0):
     """
-    precompute rope freqs for all possible value of m-theta to multiple with 
-    q and k 
+    precompute rope freqs for all possible value of m-theta to multiply with 
+    q and k later
     """
     assert head_dim % 2 == 0, "head_dim must be divisible by 2"
 
@@ -38,12 +38,12 @@ def precompute_freqs_cis(head_dim, seq_len, theta: float = 10000.0):
     return freqs_complex
 
 def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs: torch.Tensor):
-    ## convert to pair of numbers for complex number representation
+    ## convert q, k as pair of numbers for complex number representation
     q_cmplx = torch.view_as_complex( q.float().reshape(*q.shape[:-1], -1, 2 ) )
     k_cmplx = torch.view_as_complex( k.float().reshape(*k.shape[:-1], -1, 2 ) )
-    ## add fake batch and heads
+    ## add fake batch and head for multiplying
     freqs = freqs.unsqueeze(0).unsqueeze(2)                                   # (seq_len, head_dim/ 2) -> (1, seq_len, 1, head_dim/ 2)
-    ## view as real and reshape to original
+    ## muliply q with freqs, convert to real and resend in orignal shape
     q_rotated = torch.view_as_real(q_cmplx * freqs).reshape(*q.shape)
     k_rotated = torch.view_as_real(k_cmplx * freqs).reshape(*k.shape)
     return q_rotated, k_rotated
@@ -62,7 +62,7 @@ class GQA(nn.Module):
         self.v_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
 
-        ## max seq_len for rot emb/ kv cache
+        ## max seq_len for rot emb/ kv cache, minimum keeping as 2048 because of max new token generation that im doing
         max_pos = 2 * self.seq_len
         if max_pos < 2048: max_pos = 2048
         freqs_cis = precompute_freqs_cis(self.head_dim, max_pos)
@@ -88,7 +88,7 @@ class GQA(nn.Module):
         else:
             q, k = apply_rotary_emb(q, k, self.freqs_cis[step:step+T])
 
-        ## use kv cache
+        ## when inital processing k, v is empty, fill it
         if step is not None:
             if self.k_cache is None:
                 self.k_cache = torch.zeros(B, self.seq_len, self.kv_heads, self.head_dim, device=x.device)
@@ -160,7 +160,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         swish = F.silu(self.w1(x))          # B T hddn 
-        return self.w2( self.w3(x) * swish) # B T hddn -> B T d_model
+        return self.w2( swish * self.w3(x) )# B T hddn -> B T d_model
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -212,12 +212,15 @@ class LLAMAModel(nn.Module):
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
-
-    def generate(self, idx, max_new_tokens, use_kv_cache = True):
+    
+    def _reset_kv_cache(self, use_kv_cache):
         if use_kv_cache:
             for block in self.blocks:
                 block.attn.k_cache = None
                 block.attn.v_cache = None
+
+    def generate(self, idx, max_new_tokens, use_kv_cache = True):
+        self._reset_kv_cache(use_kv_cache)
 
         for step in range(max_new_tokens):
             ## prompt processing phase
@@ -241,6 +244,40 @@ class LLAMAModel(nn.Module):
 
             idx = torch.cat((idx, idx_new), dim = 1)
         return idx
+
+    ''' cyclic KV cache but this wont work because of RoPE, may fix in future
+    def generate(self, idx, max_new_tokens, use_kv_cache = True):
+        self._reset_kv_cache(use_kv_cache)
+        is_prompt_phase, pos = True, 0
+
+        for _ in range(max_new_tokens):
+            ## token generation phase
+            ## send only the last generated token and reuse from kv-cache
+            if use_kv_cache and not is_prompt_phase:
+                context = idx[:, -1:]
+                pos = (idx.shape[1] - 1 ) % self.seq_len 
+            ## prompt processing phase
+            ## during inital step or when kv cache disabled, we need to process whole context
+            else:
+                context = idx[:, -self.seq_len:]
+                self._reset_kv_cache(use_kv_cache)
+                pos = 0
+                is_prompt_phase = False
+
+            # kv caching index
+            if use_kv_cache:
+                logits, _ = self(context, step = pos)
+            else:
+                logits, _ = self(context)
+            logits = logits[:, -1, :] # take the newly generated token
+            probs = F.softmax(logits, dim=-1)
+            idx_new = torch.multinomial(probs, num_samples=1)
+
+            idx = torch.cat((idx, idx_new), dim = 1)
+            if (idx.shape[1] % self.seq_len) > (self.seq_len - 1):
+                is_prompt_phase = True
+        return idx
+    '''
 
 if __name__ == "__main__":
     ## load data and tokenize
