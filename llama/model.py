@@ -61,7 +61,9 @@ class GQA(nn.Module):
         self.k_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
         self.v_proj =  nn.Linear(config.d_model, self.kv_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        self.freqs_cis = precompute_freqs_cis(self.head_dim, self.seq_len)
+
+        freqs_cis = precompute_freqs_cis(self.head_dim, self.seq_len)
+        self.register_buffer('freqs_cis', freqs_cis, persistent=False)
         
         self.register_buffer('trill', torch.tril(torch.ones((config.seq_len, config.seq_len))), persistent=False)
         self.k_cache = None
@@ -171,7 +173,7 @@ class Block(nn.Module):
         """
         ## refer diagram for the logic
         x = x + self.attn( self.attn_norm(x) )
-        x = x + self.ff_norm( self.ff(x) )
+        x = x + self.ff( self.ff_norm(x) )
         return x
 
 class LLAMAModel(nn.Module):
