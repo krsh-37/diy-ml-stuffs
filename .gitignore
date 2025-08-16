@@ -8,6 +8,7 @@ __pycache__/
 scratchbook
 
 data/aclImdb
+saved_model_results
 
 # C extensions
 *.so

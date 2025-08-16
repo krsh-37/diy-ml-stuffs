@@ -179,6 +179,7 @@ class Block(nn.Module):
 class LLAMAModel(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.seq_len = config.seq_len
         self.tok_emb = nn.Embedding(config.vocab_size, config.d_model)
         self.blocks = nn.Sequential(* [Block(config=config) for _ in range(config.n_blocks) ] )
         self.out_norm = RMSNorm(config)
@@ -203,6 +204,17 @@ class LLAMAModel(nn.Module):
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
+
+    def generate(self, idx, max_new_tokens):
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.seq_len:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] # We are not modifying in forward
+            probs = F.softmax(logits, dim=-1)
+            idx_new = torch.multinomial(probs, num_samples=1)
+
+            idx = torch.cat((idx, idx_new), dim = 1)
+        return idx
 
 if __name__ == "__main__":
     ## load data and tokenize
