@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import numpy as np
-
 class PositionalEmbedding(nn.Module):
     """
     receives (B n_patches emb_dim)
@@ -14,7 +12,6 @@ class PositionalEmbedding(nn.Module):
     """
     def __init__(self, emb_dim = 768, n_patches = 196, pooling_type = "cls"):
         super().__init__()
-        breakpoint()
         n_tokens = (n_patches+1) if pooling_type == "cls" else n_patches
         self.pooling_type = pooling_type
 
@@ -98,11 +95,10 @@ class VisionTransformer(nn.Module):
         self.apply_pos_emb = PositionalEmbedding(emb_dim, self.patch_emb.n_patches, self.pooling_type)
         self.out_norm = nn.LayerNorm(emb_dim)
         self.out_proj = nn.Linear(emb_dim, self.n_classes)
-        self.blocks = nn.Sequential(* [ Block() for _ in range(n_blocks) ] )
+        self.blocks = nn.Sequential(* [ Block(emb_dim=emb_dim) for _ in range(n_blocks) ] )
     
     def forward(self, x, targets = None):
-        B = x.shape[0]
-        x = self.apply_pos_emb( self.patch_emb(x) )            # patch emb and then add pos emb
+        x = self.apply_pos_emb( self.patch_emb(x) )     # patch emb and then add pos emb
         x = self.blocks(x)
         x = self.out_norm(x)
 
@@ -114,8 +110,7 @@ class VisionTransformer(nn.Module):
         logits = self.out_proj(agg_score)
         loss = None
         if targets is not None:
-            pass
-        
+            loss = F.cross_entropy(logits, target=targets)
         return logits, loss
 
 if __name__ == "__main__":
