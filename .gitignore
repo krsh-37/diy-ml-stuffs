@@ -9,6 +9,9 @@ scratchbook
 
 data/aclImdb
 data/mnist
+data/celeba
+data/anime_faces
+
 saved_model_results
 
 # C extensions

@@ -13,9 +13,13 @@ This repository contains my ongoing do-it-yourself style experimentations of ML 
 ##### Attention
 - Attention, causal, Multi-head `[done]` 
 
-##### LLMS
+##### LLMs
 - GPT scratch `[done]`
 - LLAMA train & infer implementaion `[done]`
+
+##### Generative Model
+- AE, VAE `[done]`
+- Diffusion (DDPM) `[done]`
 
 ##### Classical ML
 - Kmeans 
