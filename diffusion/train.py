@@ -156,7 +156,8 @@ class TransformerBlock(nn.Module):
 class SinusoidalTimesEmb(nn.Module):
     def __init__(self, t_emb_dim, scaled_t_emb_dim):
         super().__init__()
-        self.inv_freq = nn.Parameter( 10000 ** (torch.arange(0, t_emb_dim, 2).float()/ t_emb_dim ), requires_grad=False )
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, t_emb_dim, 2).float() / t_emb_dim))
+        self.register_buffer("inv_freq", inv_freq)
         self.time_mlp = nn.Sequential(
             nn.Linear(t_emb_dim, scaled_t_emb_dim),
             nn.SiLU(),
