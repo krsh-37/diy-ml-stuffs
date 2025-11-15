@@ -32,7 +32,7 @@ class Sampler:
     alpha_hat -> alpha_cumprod
     sigma_t -> std. dev from variance (which is beta_t_tilda) 
     """
-    def __init__(self, num_steps = 1000, beta_start = 0.0001 , beta_end = 0.01):
+    def __init__(self, num_steps = 1000, beta_start = 1e-4 , beta_end = 0.02):
         self.num_steps = num_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
@@ -156,7 +156,8 @@ class TransformerBlock(nn.Module):
 class SinusoidalTimesEmb(nn.Module):
     def __init__(self, t_emb_dim, scaled_t_emb_dim):
         super().__init__()
-        self.inv_freq = nn.Parameter( 10000 ** (torch.arange(0, t_emb_dim, 2).float()/ t_emb_dim ), requires_grad=False )
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, t_emb_dim, 2).float() / t_emb_dim))
+        self.register_buffer("inv_freq", inv_freq)
         self.time_mlp = nn.Sequential(
             nn.Linear(t_emb_dim, scaled_t_emb_dim),
             nn.SiLU(),
