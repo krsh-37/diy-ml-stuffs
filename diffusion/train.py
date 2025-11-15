@@ -32,7 +32,7 @@ class Sampler:
     alpha_hat -> alpha_cumprod
     sigma_t -> std. dev from variance (which is beta_t_tilda) 
     """
-    def __init__(self, num_steps = 1000, beta_start = 0.0001 , beta_end = 0.01):
+    def __init__(self, num_steps = 1000, beta_start = 1e-4 , beta_end = 0.02):
         self.num_steps = num_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
@@ -214,7 +214,7 @@ class Upsample(nn.Module):
         )
     def forward(self, x):
         B, C, H, W = x.shape
-        x = self.upsample(x, mode='nearest'),
+        x = self.upsample(x)
         # because we will always downsample by 2 and upsample by 2
         assert x.shape == (B, C, H * 2, W * 2)
         return x
